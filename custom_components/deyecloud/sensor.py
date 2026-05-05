@@ -345,7 +345,18 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
 
     async def _async_update_station_data(self, session, station_id, base_url, station_info):
         """Fetch data for a single station."""
-        data = {"info": station_info, "history": [], "daily": {}, "devices": {}}
+        previous_station_data = (self.data or {}).get(station_id, {})
+        previous_daily = previous_station_data.get("daily", {})
+
+        data = {
+            "info": station_info,
+            "history": [],
+            # Preserve previous daily values when DeyeCloud temporarily returns
+            # no daily record. This prevents Today sensors from jumping to
+            # Unknown during API delays or edge cases around midnight/month end.
+            "daily": dict(previous_daily),
+            "devices": {},
+        }
 
         # Monthly history should not break daily/device updates if it fails.
         try:
@@ -354,9 +365,11 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Error updating monthly history for station %s: %s", station_id, exc)
             data["history"] = self._history_cache.get(station_id, [])
 
-        # Fetch daily data day-by-day with startAt == endAt.
-        # This avoids Deye API issues on the last day of a month when an end date
-        # would otherwise cross into the next month.
+        # Fetch daily data day-by-day.
+        # DeyeCloud appears to need endAt = next day for in-progress Today data.
+        # However, the last day of a month can fail when that next day crosses
+        # into the next month, so keep a same-day fallback and preserve cached
+        # values when the API returns no records.
         try:
             today_date = dt_util.now().date()
             days = [
@@ -367,11 +380,42 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
 
             for d in days:
                 day = d.isoformat()
-                daily_items = await _async_daily_history(
-                    session, self.token, station_id, base_url, day, day
-                )
+                next_day = d + timedelta(days=1)
+                next_day_str = next_day.isoformat()
+
+                daily_items = []
+
+                # Primary request: this is the format that returns Today data
+                # on normal days.
+                try:
+                    daily_items = await _async_daily_history(
+                        session, self.token, station_id, base_url, day, next_day_str
+                    )
+                except Exception as exc:
+                    _LOGGER.debug(
+                        "Daily history primary request failed for station %s day %s: %s",
+                        station_id,
+                        day,
+                        exc,
+                    )
+
+                # Fallback request for month-end or API edge cases.
+                if not daily_items:
+                    try:
+                        daily_items = await _async_daily_history(
+                            session, self.token, station_id, base_url, day, day
+                        )
+                    except Exception as exc:
+                        _LOGGER.debug(
+                            "Daily history fallback request failed for station %s day %s: %s",
+                            station_id,
+                            day,
+                            exc,
+                        )
 
                 if not daily_items:
+                    # Keep previous cached value if available instead of replacing
+                    # it with Unknown.
                     continue
 
                 for item in daily_items:
