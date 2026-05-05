@@ -1,7 +1,7 @@
 {
   "name": "DeyeCloud Integration",
   "domain": "deyecloud",
-  "version": "1.0.8",
+  "version": "1.0.17",
   "homeassistant": "2022.5.0",
   "codeowners": ["@heavenknows1978"],
   "documentation": "https://github.com/heavenknows1978/hass-deyecloud",
