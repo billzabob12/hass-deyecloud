@@ -73,7 +73,7 @@ Depending on your region:
 
 | Field       | Description |
 |-------------|-------------|
-| Username    | Your Deye Cloud Username (not email, username must be created in the cloud website after logging in ) |
+| Username    | Your Deye Cloud Username / Email |
 | Password    | Your Deye password |
 | App ID      | From developer portal |
 | App Secret  | From developer portal |
