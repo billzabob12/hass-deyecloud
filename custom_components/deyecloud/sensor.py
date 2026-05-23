@@ -26,6 +26,7 @@ from .const import (
     CONF_APP_SECRET,
     CONF_BASE_URL,
     CONF_START_MONTH,
+    CONF_COMPANY_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,6 +71,11 @@ def _build_login_payload(login: str) -> dict[str, str]:
     if "@" in login:
         return {"email": login}
     return {"username": login}
+
+
+def _as_list(value):
+    """Return value if it is a list, otherwise return an empty list."""
+    return value if isinstance(value, list) else []
 
 
 def _as_float_or_original(value):
@@ -117,7 +123,15 @@ async def _post_json(session: aiohttp.ClientSession, url: str, *, headers=None, 
     raise last_exc
 
 
-async def _async_get_token(session: aiohttp.ClientSession, username, password, app_id, app_secret, base_url):
+async def _async_get_token(
+    session: aiohttp.ClientSession,
+    username,
+    password,
+    app_id,
+    app_secret,
+    base_url,
+    company_id=None,
+):
     url = f"{base_url}/account/token?appId={app_id}"
     _LOGGER.debug("Requesting token from API: %s", url)
     payload = {
@@ -125,6 +139,9 @@ async def _async_get_token(session: aiohttp.ClientSession, username, password, a
         **_build_login_payload(username),
         "password": _sha256(password),
     }
+
+    if company_id:
+        payload["companyId"] = str(company_id).strip()
 
     j = await _post_json(session, url, payload=payload, timeout=10)
     if not j.get("success"):
@@ -141,7 +158,13 @@ async def _async_station_list(session, token, base_url):
     headers = {"Authorization": f"Bearer {token}"}
 
     j = await _post_json(session, url, headers=headers, payload={}, timeout=10)
-    stations = j.get("stationList", [])
+    if not j.get("success", True):
+        _LOGGER.error("Station list request failed: %s", j.get("msg"))
+        raise Exception(f"Station list request failed: {j.get('msg')}")
+
+    # DeyeCloud can return stationList: null for installer/business accounts
+    # when companyId is missing or the account has no accessible stations.
+    stations = _as_list(j.get("stationList"))
     _LOGGER.info("Received %d stations from API", len(stations))
     return stations
 
@@ -178,7 +201,7 @@ async def _async_history(session, token, station_id, base_url):
         if not j.get("success"):
             _LOGGER.error("Monthly history request failed for station_id %s: %s", station_id, j.get("msg"))
             raise Exception(f"History request failed: {j.get('msg')}")
-        items.extend(j.get("stationDataItems", []))
+        items.extend(_as_list(j.get("stationDataItems")))
 
         start = range_end + relativedelta(months=1)
 
@@ -202,7 +225,7 @@ async def _async_daily_history(session, token, station_id, base_url, start_date,
         _LOGGER.error("Daily history request failed for station_id %s: %s", station_id, j.get("msg"))
         raise Exception(f"Daily history request failed: {j.get('msg')}")
 
-    items = j.get("stationDataItems", [])
+    items = _as_list(j.get("stationDataItems"))
     _LOGGER.debug("Received %d daily records for station_id %s", len(items), station_id)
     return items
 
@@ -211,7 +234,11 @@ async def _async_get_device_list(session, token, base_url, stations):
     url = f"{base_url}/station/device"
     _LOGGER.debug("Fetching device list from API: %s", url)
     headers = {"Authorization": f"Bearer {token}"}
-    station_ids = [st.get("id") or st.get("stationId") for st in stations if st.get("id") or st.get("stationId")]
+    station_ids = [
+        st.get("id") or st.get("stationId")
+        for st in _as_list(stations)
+        if st.get("id") or st.get("stationId")
+    ]
     if not station_ids:
         _LOGGER.warning("No stationIds available for request")
         return []
@@ -233,7 +260,7 @@ async def _async_get_device_list(session, token, base_url, stations):
             _LOGGER.error("Device list request failed: %s", j.get("msg"))
             raise Exception(f"Device list request failed: {j.get('msg')}")
 
-        page_items = j.get("deviceListItems", [])
+        page_items = _as_list(j.get("deviceListItems"))
         devices.extend(page_items)
 
         # Stop when API returns fewer than requested. If the API exposes total, honor it too.
@@ -263,7 +290,7 @@ async def _async_get_device_status(session, token, base_url, device_list):
         raise Exception(f"Device status request failed: {j.get('msg')}")
 
     _LOGGER.debug("Received device status: %s", j)
-    return j.get("deviceDataList", [])
+    return _as_list(j.get("deviceDataList"))
 
 
 class DeyeCloudCoordinator(DataUpdateCoordinator):
@@ -290,12 +317,19 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
         app_id = self.entry.data[CONF_APP_ID]
         app_secret = self.entry.data[CONF_APP_SECRET]
         base_url = self.entry.data[CONF_BASE_URL]
+        company_id = self.entry.data.get(CONF_COMPANY_ID)
 
         now_utc = dt_util.utcnow()
         if not self.token or not self.token_expiry or self.token_expiry <= now_utc:
             try:
                 self.token = await _async_get_token(
-                    self.session, username, password, app_id, app_secret, base_url
+                    self.session,
+                    username,
+                    password,
+                    app_id,
+                    app_secret,
+                    base_url,
+                    company_id,
                 )
                 # Keep conservative expiry. If API provides expiresIn, replace this with API value.
                 self.token_expiry = dt_util.utcnow() + timedelta(minutes=25)
