@@ -16,6 +16,7 @@ from .const import (
     CONF_APP_SECRET,
     CONF_BASE_URL,
     CONF_START_MONTH,
+    CONF_COMPANY_ID,
 )
 from .api import async_get_token
 
@@ -53,7 +54,67 @@ def _data_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             CONF_START_MONTH,
             default=defaults.get(CONF_START_MONTH, DEFAULT_START_MONTH),
         ): str,
+        vol.Optional(
+            CONF_COMPANY_ID,
+            default=defaults.get(CONF_COMPANY_ID, ""),
+        ): str,
     })
+
+
+def _normalize_user_input(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize form input before saving it to the config entry."""
+    data = dict(user_input)
+
+    for key in (
+        CONF_USERNAME,
+        CONF_PASSWORD,
+        CONF_APP_ID,
+        CONF_APP_SECRET,
+        CONF_BASE_URL,
+        CONF_START_MONTH,
+        CONF_COMPANY_ID,
+    ):
+        if key in data and isinstance(data[key], str):
+            data[key] = data[key].strip()
+
+    # Keep old entries clean: do not persist an empty optional company_id.
+    if not data.get(CONF_COMPANY_ID):
+        data.pop(CONF_COMPANY_ID, None)
+
+    return data
+
+
+async def _async_validate_credentials_and_stations(hass, user_input: dict[str, Any]) -> None:
+    """Validate credentials and ensure at least one station is accessible."""
+    session = async_get_clientsession(hass)
+
+    token = await async_get_token(
+        session,
+        user_input[CONF_USERNAME],
+        user_input[CONF_PASSWORD],
+        user_input[CONF_APP_ID],
+        user_input[CONF_APP_SECRET],
+        user_input[CONF_BASE_URL],
+        user_input.get(CONF_COMPANY_ID),
+    )
+
+    station_url = f"{user_input[CONF_BASE_URL]}/station/list"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with session.post(station_url, headers=headers, json={}, timeout=10) as resp:
+        resp.raise_for_status()
+        station_response = await resp.json()
+
+    if not station_response.get("success", True):
+        raise Exception(f"Station list request failed: {station_response.get('msg')}")
+
+    stations = station_response.get("stationList") or []
+    if not stations:
+        raise NoStationsFound
+
+
+class NoStationsFound(Exception):
+    """Raised when credentials are valid but no stations are accessible."""
 
 
 class DeyeCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -72,26 +133,25 @@ class DeyeCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
+            user_input = _normalize_user_input(user_input)
+
+            unique_id = (
+                f"{user_input[CONF_USERNAME]}:"
+                f"{user_input.get(CONF_COMPANY_ID) or 'personal'}"
+            )
+            await self.async_set_unique_id(unique_id)
+            self._abort_if_unique_id_configured()
+
             try:
-                session = async_get_clientsession(self.hass)
-
-                await async_get_token(
-                    session,
-                    user_input[CONF_USERNAME],
-                    user_input[CONF_PASSWORD],
-                    user_input[CONF_APP_ID],
-                    user_input[CONF_APP_SECRET],
-                    user_input[CONF_BASE_URL],
-                )
-
-                await self.async_set_unique_id(user_input[CONF_USERNAME])
-                self._abort_if_unique_id_configured()
+                await _async_validate_credentials_and_stations(self.hass, user_input)
 
                 return self.async_create_entry(
                     title=f"DeyeCloud - {user_input[CONF_USERNAME]}",
                     data=user_input,
                 )
 
+            except NoStationsFound:
+                errors["base"] = "no_stations_found"
             except Exception:
                 errors["base"] = "auth_failed"
 
@@ -120,17 +180,10 @@ class DeyeCloudOptionsFlowHandler(config_entries.OptionsFlow):
         current_data = dict(self._config_entry.data)
 
         if user_input is not None:
-            try:
-                session = async_get_clientsession(self.hass)
+            user_input = _normalize_user_input(user_input)
 
-                await async_get_token(
-                    session,
-                    user_input[CONF_USERNAME],
-                    user_input[CONF_PASSWORD],
-                    user_input[CONF_APP_ID],
-                    user_input[CONF_APP_SECRET],
-                    user_input[CONF_BASE_URL],
-                )
+            try:
+                await _async_validate_credentials_and_stations(self.hass, user_input)
 
                 self.hass.config_entries.async_update_entry(
                     self._config_entry,
@@ -140,6 +193,8 @@ class DeyeCloudOptionsFlowHandler(config_entries.OptionsFlow):
 
                 return self.async_create_entry(title="", data={})
 
+            except NoStationsFound:
+                errors["base"] = "no_stations_found"
             except Exception:
                 errors["base"] = "auth_failed"
 

@@ -13,6 +13,7 @@ from .const import (
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_BASE_URL,
+    CONF_COMPANY_ID,
 )
 from .api import async_get_token, async_control_solar_sell
 
@@ -28,7 +29,12 @@ async def _async_fetch_station_list(session, token, base_url):
         resp.raise_for_status()
         data = await resp.json()
 
-    return data.get("stationList", [])
+    if not data.get("success", True):
+        raise Exception(f"Station list request failed: {data.get('msg')}")
+
+    # DeyeCloud can return stationList: null for accounts without accessible
+    # personal stations, especially installer/business accounts without companyId.
+    return data.get("stationList") or []
 
 
 async def _async_fetch_inverter_devices(session, token, base_url, station_ids):
@@ -57,7 +63,8 @@ async def _async_fetch_inverter_devices(session, token, base_url, station_ids):
         if not device_response.get("success", True):
             raise Exception(f"Device list request failed: {device_response.get('msg')}")
 
-        page_items = device_response.get("deviceListItems", [])
+        # Avoid NoneType iteration if API returns deviceListItems: null.
+        page_items = device_response.get("deviceListItems") or []
         devices.extend(page_items)
 
         total = device_response.get("total") or device_response.get("totalCount")
@@ -89,6 +96,7 @@ async def async_setup_entry(
     app_id = config.get(CONF_APP_ID)
     app_secret = config.get(CONF_APP_SECRET)
     base_url = config.get(CONF_BASE_URL)
+    company_id = config.get(CONF_COMPANY_ID)
 
     session = async_get_clientsession(hass)
     entities = []
@@ -101,6 +109,7 @@ async def async_setup_entry(
             app_id,
             app_secret,
             base_url,
+            company_id,
         )
 
         stations_data = await _async_fetch_station_list(session, token, base_url)
@@ -109,6 +118,12 @@ async def async_setup_entry(
             for st in stations_data
             if st.get("id") or st.get("stationId")
         ]
+
+        if not station_ids:
+            _LOGGER.warning(
+                "No DeyeCloud stations found for button setup. "
+                "If this is an installer/business account, configure company_id."
+            )
 
         inverter_devices = await _async_fetch_inverter_devices(
             session,
@@ -127,6 +142,7 @@ async def async_setup_entry(
                 app_id,
                 app_secret,
                 base_url,
+                company_id,
                 sn,
                 "Enable",
                 True,
@@ -140,6 +156,7 @@ async def async_setup_entry(
                 app_id,
                 app_secret,
                 base_url,
+                company_id,
                 sn,
                 "Disable",
                 False,
@@ -165,6 +182,7 @@ class DeyeSolarSellButton(ButtonEntity):
         app_id,
         app_secret,
         base_url,
+        company_id,
         device_sn,
         action_name,
         is_enable,
@@ -176,6 +194,7 @@ class DeyeSolarSellButton(ButtonEntity):
         self._app_id = app_id
         self._app_secret = app_secret
         self._base_url = base_url
+        self._company_id = company_id
         self._device_sn = device_sn
         self._is_enable = is_enable
 
@@ -205,6 +224,7 @@ class DeyeSolarSellButton(ButtonEntity):
                 self._app_id,
                 self._app_secret,
                 self._base_url,
+                self._company_id,
             )
 
             await async_control_solar_sell(

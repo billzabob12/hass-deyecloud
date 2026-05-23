@@ -19,13 +19,31 @@ def _build_login_payload(login: str) -> dict[str, str]:
     return {"username": login}
 
 
-async def async_get_token(session: aiohttp.ClientSession, username, password, app_id, app_secret, base_url):
+async def async_get_token(
+    session: aiohttp.ClientSession,
+    username,
+    password,
+    app_id,
+    app_secret,
+    base_url,
+    company_id=None,
+):
+    """Get DeyeCloud access token.
+
+    If company_id is provided, DeyeCloud returns a business/company token.
+    This is needed for installer/business accounts. Without company_id,
+    DeyeCloud returns a personal-user token.
+    """
     url = f"{base_url}/account/token?appId={app_id}"
+
     payload = {
         "appSecret": app_secret,
         **_build_login_payload(username),
         "password": _sha256(password),
     }
+
+    if company_id:
+        payload["companyId"] = str(company_id).strip()
 
     async with session.post(url, json=payload, timeout=10) as resp:
         resp.raise_for_status()
@@ -35,7 +53,13 @@ async def async_get_token(session: aiohttp.ClientSession, username, password, ap
         return j["accessToken"]
 
 
-async def async_control_solar_sell(session: aiohttp.ClientSession, token, base_url, device_sn, is_enable):
+async def async_control_solar_sell(
+    session: aiohttp.ClientSession,
+    token,
+    base_url,
+    device_sn,
+    is_enable,
+):
     """Send Solar Sell control command."""
     url = f"{base_url}/order/sys/solarSell/control"
 
