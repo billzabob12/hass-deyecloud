@@ -48,6 +48,29 @@ _DAILY_LABELS = {
 }
 
 
+_DAILY_ZERO_RECORD_KEYS = (
+    "generationValue",
+    "consumptionValue",
+    "gridValue",
+    "purchaseValue",
+    "chargeValue",
+    "dischargeValue",
+)
+
+
+def _empty_daily_record(day: str) -> dict:
+    """Return an explicit zero daily record for a date.
+
+    This is used right after midnight when DeyeCloud has not yet published
+    the new day's daily record. It prevents Today sensors from carrying
+    yesterday's final values into the new day or becoming Unknown.
+    """
+    record = {"date": day}
+    for key in _DAILY_ZERO_RECORD_KEYS:
+        record[key] = 0.0
+    return record
+
+
 def _resolve_daily_date_key(date_key: str) -> str:
     """Convert relative day key to YYYY-MM-DD using HA timezone."""
     if date_key in _RELATIVE_DAY_OFFSETS:
@@ -448,18 +471,38 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
                         )
 
                 if not daily_items:
-                    # Keep previous cached value if available instead of replacing
-                    # it with Unknown.
+                    if d == today_date and day not in data["daily"]:
+                        # At midnight DeyeCloud may not have a valid record for
+                        # the new day yet. Today should start from 0, not from
+                        # yesterday's final value and not as Unknown.
+                        data["daily"][day] = _empty_daily_record(day)
+                    # Otherwise keep same-date cached value if available.
                     continue
+
+                matched_item = None
+                has_date_field = False
 
                 for item in daily_items:
                     item_date = item.get("date")
-                    if item_date and item_date.startswith(day):
-                        data["daily"][day] = item
-                        break
-                else:
-                    # Fallback for APIs that return the requested day without a date field.
+                    if item_date:
+                        has_date_field = True
+                        if item_date.startswith(day):
+                            matched_item = item
+                            break
+
+                if matched_item is not None:
+                    data["daily"][day] = matched_item
+                elif not has_date_field:
+                    # Only use this fallback when the API returns records with no
+                    # date field at all. Never map a record from a different date
+                    # into the requested day.
                     data["daily"][day] = daily_items[0]
+                elif d == today_date and day not in data["daily"]:
+                    # API returned dated records, but none matched the new day.
+                    # This can happen around midnight. Start Today at 0 to keep
+                    # Energy Dashboard statistics sane.
+                    data["daily"][day] = _empty_daily_record(day)
+                # Else keep same-date cached value if available.
         except Exception as exc:
             _LOGGER.error("Error updating daily history for station %s: %s", station_id, exc)
 
@@ -550,7 +593,7 @@ class DeyeCloudSensor(CoordinatorEntity, SensorEntity):
 
             elif self._sensor_type == "device":
                 device_data = station_data.get("devices", {}).get(self._device_sn, {})
-                for data_item in device_data.get("dataList", []):
+                for data_item in device_data.get("dataList") or []:
                     if data_item.get("key") == self._device_key:
                         return _as_float_or_original(data_item.get("value"))
 
@@ -731,7 +774,7 @@ async def async_setup_entry(
         # Device status sensors.
         for device_sn, device_data in station_data.get("devices", {}).items():
             device_sn = str(device_sn)
-            for data_item in device_data.get("dataList", []):
+            for data_item in device_data.get("dataList") or []:
                 key = data_item.get("key")
                 if not key:
                     continue
