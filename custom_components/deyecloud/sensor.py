@@ -710,7 +710,8 @@ async def async_setup_entry(
                 unique_id=uid,
                 unit="kWh",
                 device_class="energy",
-                # Monthly period total, not a continuously increasing counter.
+                # Historical monthly period total. Kept as total because this
+                # entity represents a fixed period value, not a live meter.
                 state_class="total",
                 station_id=station_id,
                 date_key=f"{y}_{m}",
@@ -728,7 +729,11 @@ async def async_setup_entry(
                 unique_id=uid,
                 unit="kWh",
                 device_class="energy",
-                state_class="total",
+                # Current-month DeyeCloud values reset at month boundary and
+                # then increase again. total_increasing lets HA statistics
+                # treat that decrease as a new meter cycle instead of a
+                # negative energy delta.
+                state_class="total_increasing",
                 station_id=station_id,
                 date_key="current",
                 metric_key=metric_key,
@@ -744,6 +749,10 @@ async def async_setup_entry(
                 unique_id=uid,
                 unit="kWh",
                 device_class="energy",
+                # Last-month value is a fixed previous-period total, not a
+                # live increasing meter. Keep it as total instead of
+                # total_increasing so HA does not treat a lower next-month
+                # value as another meter cycle.
                 state_class="total",
                 station_id=station_id,
                 date_key="last",
@@ -764,7 +773,11 @@ async def async_setup_entry(
                     unique_id=uid,
                     unit="kWh",
                     device_class="energy",
-                    state_class="total",
+                    # Daily DeyeCloud values reset to 0 at midnight and then
+                    # increase during the day. With state_class="total", HA
+                    # interprets the midnight drop as a negative delta.
+                    # total_increasing makes the reset a new meter cycle.
+                    state_class="total_increasing",
                     station_id=station_id,
                     date_key=rel_key,
                     metric_key=metric_key,
