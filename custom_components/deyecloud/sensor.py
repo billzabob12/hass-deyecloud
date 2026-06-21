@@ -71,6 +71,118 @@ def _empty_daily_record(day: str) -> dict:
     return record
 
 
+# DeyeCloud can lag right after local midnight and may still return the
+# previous daily bucket for a short time. During this window, never expose a
+# previous-day aggregate as the new day's "Today" value, because Home
+# Assistant may record it into the new day's Energy Dashboard statistics.
+_MIDNIGHT_STALE_GUARD = timedelta(hours=2)
+_FLOAT_EPSILON = 0.001
+
+
+def _parse_api_date(value) -> date | None:
+    """Parse a DeyeCloud date-like value into a date if possible."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Common API formats: YYYY-MM-DD, YYYY-MM-DD HH:MM:SS,
+    # YYYY-MM-DDTHH:MM:SS..., YYYY/MM/DD.
+    text = text.replace("/", "-")
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _numeric_value(record: dict | None, key: str) -> float | None:
+    """Return a numeric value from a daily/monthly record if possible."""
+    if not record:
+        return None
+    try:
+        value = record.get(key)
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _records_look_like_same_daily_bucket(record: dict | None, reference: dict | None) -> bool:
+    """Detect a stale daily record that is likely copied from yesterday.
+
+    Around midnight DeyeCloud may return yesterday's final values while Home
+    Assistant is already on the new local date. If today's candidate has the
+    same non-zero energy totals as yesterday, treat it as stale and publish 0
+    until DeyeCloud exposes a real current-day bucket.
+    """
+    if not record or not reference:
+        return False
+
+    matched_non_zero_values = 0
+    for key in _DAILY_ZERO_RECORD_KEYS:
+        current = _numeric_value(record, key)
+        previous = _numeric_value(reference, key)
+        if current is None or previous is None:
+            continue
+        if previous > _FLOAT_EPSILON and abs(current - previous) <= _FLOAT_EPSILON:
+            matched_non_zero_values += 1
+
+    # One exact match can happen naturally; two or more across independent
+    # energy counters strongly indicates the cloud returned the old bucket.
+    return matched_non_zero_values >= 2
+
+
+def _is_midnight_guard_window(now: datetime) -> bool:
+    """Return True during the local post-midnight stale-data guard window."""
+    start = datetime.combine(now.date(), datetime.min.time(), tzinfo=now.tzinfo)
+    return now - start < _MIDNIGHT_STALE_GUARD
+
+
+def _select_daily_record(
+    daily_items: list[dict],
+    day: str,
+    *,
+    allow_undated_fallback: bool,
+) -> dict | None:
+    """Select only the record that actually belongs to the requested day."""
+    target = datetime.strptime(day, "%Y-%m-%d").date()
+    has_date_field = False
+
+    for item in daily_items:
+        item_date = _parse_api_date(
+            item.get("date")
+            or item.get("time")
+            or item.get("timestamp")
+            or item.get("collectionTime")
+        )
+        if item_date is None:
+            continue
+        has_date_field = True
+        if item_date == target:
+            return item
+
+    # Some DeyeCloud responses may contain exactly one requested-day record
+    # without a date field. This fallback is intentionally disabled for Today
+    # during the post-midnight guard window to avoid mapping yesterday into
+    # the new day.
+    if allow_undated_fallback and not has_date_field and len(daily_items) == 1:
+        return daily_items[0]
+
+    return None
+
+
 def _resolve_daily_date_key(date_key: str) -> str:
     """Convert relative day key to YYYY-MM-DD using HA timezone."""
     if date_key in _RELATIVE_DAY_OFFSETS:
@@ -388,10 +500,22 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
     async def _get_monthly_history_cached(self, session, station_id, base_url):
         """Return monthly history, refreshing cache only periodically."""
         now = dt_util.now()
+        cached_history = self._history_cache.get(station_id, [])
+        current_month_present = any(
+            record.get("year") == now.year and record.get("month") == now.month
+            for record in cached_history
+        )
         needs_refresh = (
             station_id not in self._history_cache
             or self._history_last_update is None
             or now - self._history_last_update > HISTORY_REFRESH_INTERVAL
+            # At month rollover, refresh sooner than the normal 6-hour cache,
+            # but avoid hammering the API every minute if the cloud has not
+            # published the new month yet.
+            or (
+                not current_month_present
+                and now - self._history_last_update > timedelta(minutes=10)
+            )
         )
 
         if needs_refresh:
@@ -421,6 +545,18 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
         except Exception as exc:
             _LOGGER.error("Error updating monthly history for station %s: %s", station_id, exc)
             data["history"] = self._history_cache.get(station_id, [])
+
+        # If DeyeCloud has not published the new current-month bucket yet,
+        # expose an explicit 0 record instead of Unknown/stale cache data.
+        now_local = dt_util.now()
+        if not any(
+            record.get("year") == now_local.year and record.get("month") == now_local.month
+            for record in data["history"]
+        ):
+            current_month_record = {"year": now_local.year, "month": now_local.month}
+            for key in _DAILY_ZERO_RECORD_KEYS:
+                current_month_record[key] = 0.0
+            data["history"] = [*data["history"], current_month_record]
 
         # Fetch daily data day-by-day.
         # DeyeCloud appears to need endAt = next day for in-progress Today data.
@@ -470,8 +606,11 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
                             exc,
                         )
 
+                now = dt_util.now()
+                in_midnight_guard = d == today_date and _is_midnight_guard_window(now)
+
                 if not daily_items:
-                    if d == today_date and day not in data["daily"]:
+                    if d == today_date:
                         # At midnight DeyeCloud may not have a valid record for
                         # the new day yet. Today should start from 0, not from
                         # yesterday's final value and not as Unknown.
@@ -479,28 +618,29 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
                     # Otherwise keep same-date cached value if available.
                     continue
 
-                matched_item = None
-                has_date_field = False
+                matched_item = _select_daily_record(
+                    daily_items,
+                    day,
+                    allow_undated_fallback=not in_midnight_guard,
+                )
 
-                for item in daily_items:
-                    item_date = item.get("date")
-                    if item_date:
-                        has_date_field = True
-                        if item_date.startswith(day):
-                            matched_item = item
-                            break
+                if matched_item is not None and d == today_date and in_midnight_guard:
+                    yesterday_key = (today_date - timedelta(days=1)).isoformat()
+                    yesterday_record = data["daily"].get(yesterday_key)
+                    if _records_look_like_same_daily_bucket(matched_item, yesterday_record):
+                        _LOGGER.debug(
+                            "Ignoring stale DeyeCloud daily record for station %s day %s during midnight guard",
+                            station_id,
+                            day,
+                        )
+                        matched_item = _empty_daily_record(day)
 
                 if matched_item is not None:
                     data["daily"][day] = matched_item
-                elif not has_date_field:
-                    # Only use this fallback when the API returns records with no
-                    # date field at all. Never map a record from a different date
-                    # into the requested day.
-                    data["daily"][day] = daily_items[0]
-                elif d == today_date and day not in data["daily"]:
-                    # API returned dated records, but none matched the new day.
-                    # This can happen around midnight. Start Today at 0 to keep
-                    # Energy Dashboard statistics sane.
+                elif d == today_date:
+                    # API returned only older/foreign/undated records. Do not map
+                    # them into Today, otherwise HA can record yesterday's total
+                    # into the new Energy Dashboard day.
                     data["daily"][day] = _empty_daily_record(day)
                 # Else keep same-date cached value if available.
         except Exception as exc:
@@ -749,11 +889,10 @@ async def async_setup_entry(
                 unique_id=uid,
                 unit="kWh",
                 device_class="energy",
-                # Last-month value is a fixed previous-period total, not a
-                # live increasing meter. Keep it as total instead of
-                # total_increasing so HA does not treat a lower next-month
-                # value as another meter cycle.
-                state_class="total",
+                # Last-month is a historical period snapshot whose value
+                # changes to a different month at each month boundary. Do not
+                # opt it into long-term statistics or Energy Dashboard sources.
+                state_class=None,
                 station_id=station_id,
                 date_key="last",
                 metric_key=metric_key,
@@ -773,11 +912,12 @@ async def async_setup_entry(
                     unique_id=uid,
                     unit="kWh",
                     device_class="energy",
-                    # Daily DeyeCloud values reset to 0 at midnight and then
-                    # increase during the day. With state_class="total", HA
-                    # interprets the midnight drop as a negative delta.
-                    # total_increasing makes the reset a new meter cycle.
-                    state_class="total_increasing",
+                    # Only Today is a live resettable meter suitable for HA
+                    # statistics/Energy Dashboard. Yesterday and Day Before are
+                    # historical snapshots that roll to a different date each
+                    # midnight, so they must not be recorded as long-term
+                    # statistics.
+                    state_class="total_increasing" if rel_key == "today" else None,
                     station_id=station_id,
                     date_key=rel_key,
                     metric_key=metric_key,
