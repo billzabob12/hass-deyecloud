@@ -889,10 +889,11 @@ async def async_setup_entry(
                 unique_id=uid,
                 unit="kWh",
                 device_class="energy",
-                # Last-month is a historical period snapshot whose value
-                # changes to a different month at each month boundary. Do not
-                # opt it into long-term statistics or Energy Dashboard sources.
-                state_class=None,
+                # Keep state_class for backward compatibility. Home Assistant
+                # may already have long-term statistics for this legacy entity;
+                # removing state_class triggers repair warnings. Do not use this
+                # snapshot sensor as an Energy Dashboard source.
+                state_class="total",
                 station_id=station_id,
                 date_key="last",
                 metric_key=metric_key,
@@ -912,12 +913,13 @@ async def async_setup_entry(
                     unique_id=uid,
                     unit="kWh",
                     device_class="energy",
-                    # Only Today is a live resettable meter suitable for HA
-                    # statistics/Energy Dashboard. Yesterday and Day Before are
-                    # historical snapshots that roll to a different date each
-                    # midnight, so they must not be recorded as long-term
-                    # statistics.
-                    state_class="total_increasing" if rel_key == "today" else None,
+                    # Today is the live resettable meter and must be
+                    # total_increasing. Keep a state_class on legacy historical
+                    # snapshot entities as well, because Home Assistant may
+                    # already have long-term statistics for these entity IDs;
+                    # removing it creates repair warnings. Do not use Yesterday
+                    # or Day Before sensors as Energy Dashboard sources.
+                    state_class="total_increasing" if rel_key == "today" else "total",
                     station_id=station_id,
                     date_key=rel_key,
                     metric_key=metric_key,
