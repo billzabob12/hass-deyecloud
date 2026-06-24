@@ -558,11 +558,18 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
                 current_month_record[key] = 0.0
             data["history"] = [*data["history"], current_month_record]
 
-        # Fetch daily data day-by-day.
-        # DeyeCloud appears to need endAt = next day for in-progress Today data.
-        # However, the last day of a month can fail when that next day crosses
-        # into the next month, so keep a same-day fallback and preserve cached
-        # values when the API returns no records.
+        # Fetch daily data.
+        #
+        # DeyeCloud behaves inconsistently here:
+        # - Today often needs endAt = next day to expose the in-progress bucket.
+        # - Some accounts/API regions do not return older daily buckets reliably
+        #   when each day is requested as an isolated one-day range. In v2.0.1
+        #   this made all "Day Before Yesterday" sensors Unknown on first
+        #   refresh because there was no previous coordinator cache to preserve.
+        #
+        # Therefore fetch a small rolling window first, then use per-day requests
+        # only as a fallback. Strict date matching is still kept so stale
+        # yesterday data is never mapped into Today.
         try:
             today_date = dt_util.now().date()
             days = [
@@ -571,58 +578,83 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
                 today_date,
             ]
 
+            range_daily_items = []
+            try:
+                range_daily_items = await _async_daily_history(
+                    session,
+                    self.token,
+                    station_id,
+                    base_url,
+                    days[0].isoformat(),
+                    (today_date + timedelta(days=1)).isoformat(),
+                )
+            except Exception as exc:
+                _LOGGER.debug(
+                    "Daily history rolling-window request failed for station %s: %s",
+                    station_id,
+                    exc,
+                )
+
             for d in days:
                 day = d.isoformat()
                 next_day = d + timedelta(days=1)
                 next_day_str = next_day.isoformat()
 
+                now = dt_util.now()
+                in_midnight_guard = d == today_date and _is_midnight_guard_window(now)
+
+                matched_item = _select_daily_record(
+                    range_daily_items,
+                    day,
+                    allow_undated_fallback=False,
+                )
+
                 daily_items = []
-
-                # Primary request: this is the format that returns Today data
-                # on normal days.
-                try:
-                    daily_items = await _async_daily_history(
-                        session, self.token, station_id, base_url, day, next_day_str
-                    )
-                except Exception as exc:
-                    _LOGGER.debug(
-                        "Daily history primary request failed for station %s day %s: %s",
-                        station_id,
-                        day,
-                        exc,
-                    )
-
-                # Fallback request for month-end or API edge cases.
-                if not daily_items:
+                if matched_item is None:
+                    # Fallback request: this is the format that returns Today
+                    # data on normal days and also covers accounts where the
+                    # rolling-window endpoint is sparse.
                     try:
                         daily_items = await _async_daily_history(
-                            session, self.token, station_id, base_url, day, day
+                            session, self.token, station_id, base_url, day, next_day_str
                         )
                     except Exception as exc:
                         _LOGGER.debug(
-                            "Daily history fallback request failed for station %s day %s: %s",
+                            "Daily history primary request failed for station %s day %s: %s",
                             station_id,
                             day,
                             exc,
                         )
 
-                now = dt_util.now()
-                in_midnight_guard = d == today_date and _is_midnight_guard_window(now)
+                    # Same-day fallback for month-end or API edge cases.
+                    if not daily_items:
+                        try:
+                            daily_items = await _async_daily_history(
+                                session, self.token, station_id, base_url, day, day
+                            )
+                        except Exception as exc:
+                            _LOGGER.debug(
+                                "Daily history fallback request failed for station %s day %s: %s",
+                                station_id,
+                                day,
+                                exc,
+                            )
 
-                if not daily_items:
-                    if d == today_date:
-                        # At midnight DeyeCloud may not have a valid record for
-                        # the new day yet. Today should start from 0, not from
-                        # yesterday's final value and not as Unknown.
-                        data["daily"][day] = _empty_daily_record(day)
-                    # Otherwise keep same-date cached value if available.
-                    continue
+                    if not daily_items:
+                        if d == today_date:
+                            # At midnight DeyeCloud may not have a valid record
+                            # for the new day yet. Today should start from 0,
+                            # not from yesterday's final value and not as
+                            # Unknown.
+                            data["daily"][day] = _empty_daily_record(day)
+                        # Otherwise keep same-date cached value if available.
+                        continue
 
-                matched_item = _select_daily_record(
-                    daily_items,
-                    day,
-                    allow_undated_fallback=not in_midnight_guard,
-                )
+                    matched_item = _select_daily_record(
+                        daily_items,
+                        day,
+                        allow_undated_fallback=not in_midnight_guard,
+                    )
 
                 if matched_item is not None and d == today_date and in_midnight_guard:
                     yesterday_key = (today_date - timedelta(days=1)).isoformat()
