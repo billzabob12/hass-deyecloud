@@ -18,6 +18,9 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
+from .api import async_get_battery_config
+from .battery_parameters import BATTERY_PARAMETER_DESCRIPTIONS, extract_battery_parameter
+
 from .const import (
     DOMAIN,
     CONF_USERNAME,
@@ -532,11 +535,9 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
         data = {
             "info": station_info,
             "history": [],
-            # Preserve previous daily values when DeyeCloud temporarily returns
-            # no daily record. This prevents Today sensors from jumping to
-            # Unknown during API delays or edge cases around midnight/month end.
             "daily": dict(previous_daily),
             "devices": {},
+            "battery_config": {},
         }
 
         # Monthly history should not break daily/device updates if it fails.
@@ -687,6 +688,26 @@ class DeyeCloudCoordinator(DataUpdateCoordinator):
                     sn = device.get("deviceSn")
                     if sn:
                         data["devices"][str(sn)] = device
+        
+                battery_config_results = await asyncio.gather(
+                    *[
+                        async_get_battery_config(session, self.token, base_url, device_sn)
+                        for device_sn in device_sns
+                    ],
+                    return_exceptions=True,
+                )
+        
+                for device_sn, result in zip(device_sns, battery_config_results):
+                    if isinstance(result, Exception):
+                        _LOGGER.warning(
+                            "Error updating battery config for device %s: %s",
+                            device_sn,
+                            result,
+                        )
+                        continue
+        
+                    data["battery_config"][str(device_sn)] = result
+        
         except Exception as exc:
             _LOGGER.error("Error updating devices for station %s: %s", station_id, exc)
 
