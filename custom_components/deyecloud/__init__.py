@@ -2,25 +2,17 @@
 
 from __future__ import annotations
 
-# Import platform modules at module load time.
-#
-# Home Assistant 2024.7+ can warn when platform modules are first imported
-# from inside async_forward_entry_setups(), because importlib/import_module
-# may do blocking disk I/O inside the event loop.
-#
-# Keeping these imports here pre-loads the platform modules when the integration
-# itself is loaded, so async_forward_entry_setups() can reuse already-imported
-# modules.
-from . import button as _button  # noqa: F401
-from . import number as _number  # noqa: F401
-from . import sensor as _sensor  # noqa: F401
-from . import switch as _switch  # noqa: F401
+import logging
+from collections.abc import Iterable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_loaded_integration
 
 from .const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
@@ -35,11 +27,38 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
+async def _async_preload_platforms(
+    hass: HomeAssistant,
+    platforms: Iterable[Platform],
+) -> None:
+    """
+    Preload platform modules through Home Assistant's loader.
+
+    This avoids Home Assistant later importing custom_components.deyecloud.sensor,
+    button, switch, or number inside the event loop during async_forward_entry_setups.
+
+    Do not import platform modules at the top of this file. That can put the
+    modules in sys.modules without adding them to Home Assistant's loader cache,
+    which may still trigger an import_module warning during platform forwarding.
+    """
+    integration = async_get_loaded_integration(hass, DOMAIN)
+
+    platform_names = [platform.value for platform in platforms]
+
+    try:
+        await integration.async_get_platforms(platform_names)
+    except Exception:
+        _LOGGER.exception("Failed to preload DeyeCloud platforms")
+        raise
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up DeyeCloud from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    await _async_preload_platforms(hass, PLATFORMS)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
