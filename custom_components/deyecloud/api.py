@@ -78,3 +78,85 @@ async def async_control_solar_sell(
     async with session.post(url, json=payload, headers=headers, timeout=10) as resp:
         resp.raise_for_status()
         return await resp.json()
+
+async def async_post_control(
+    session: aiohttp.ClientSession,
+    token,
+    base_url,
+    path: str,
+    payload: dict,
+):
+    """POST a DeyeCloud control command."""
+    url = f"{base_url}{path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    async with session.post(url, json=payload, headers=headers, timeout=10) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    if not data.get("success", True):
+        raise Exception(f"DeyeCloud control failed: {data.get('msg') or data}")
+
+    return data
+
+
+async def async_control_grid_charge(
+    session: aiohttp.ClientSession,
+    token,
+    base_url,
+    device_sn,
+    is_enable: bool,
+):
+    """Enable or disable Deye grid charge mode."""
+    return await async_post_control(
+        session,
+        token,
+        base_url,
+        "/order/battery/modeControl",
+        {
+            "deviceSn": device_sn,
+            "batteryModeType": "GRID_CHARGE",
+            "action": "on" if is_enable else "off",
+        },
+    )
+
+
+async def async_update_battery_parameter(
+    session: aiohttp.ClientSession,
+    token,
+    base_url,
+    device_sn,
+    parameter_type: str,
+    value: float,
+):
+    """Set Deye battery parameter value."""
+    return await async_post_control(
+        session,
+        token,
+        base_url,
+        "/order/battery/parameter/update",
+        {
+            "deviceSn": device_sn,
+            # Deye's official sample uses the misspelled field name:
+            "paramterType": parameter_type,
+            "value": value,
+        },
+    )
+
+
+async def async_get_order_result(
+    session: aiohttp.ClientSession,
+    token,
+    base_url,
+    order_id,
+):
+    """Get DeyeCloud command result."""
+    url = f"{base_url}/order/{order_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with session.get(url, headers=headers, timeout=10) as resp:
+        resp.raise_for_status()
+        return await resp.json()
