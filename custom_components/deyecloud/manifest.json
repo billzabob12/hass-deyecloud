@@ -1,7 +1,7 @@
 {
   "domain": "deyecloud",
   "name": "Deye Cloud Home Assistant Integration",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "documentation": "https://github.com/heavenknows1978/hass-deyecloud",
   "dependencies": [],
   "codeowners": [
@@ -10,5 +10,6 @@
   "config_flow": true,
   "requirements": [],
   "iot_class": "cloud_polling",
-  "homeassistant": "2022.5.0"
+  "homeassistant": "2022.5.0",
+  "import_executor": true
 }
