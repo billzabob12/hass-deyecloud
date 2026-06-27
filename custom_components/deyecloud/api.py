@@ -30,13 +30,7 @@ def _sha256(password: str) -> str:
 
 
 def _build_login_payload(login: str) -> dict[str, str]:
-    """
-    Build DeyeCloud login payload using either email or username.
-
-    DeyeCloud token API supports login by mobile, email, or username.
-    This integration has a single username/login config field, so choose
-    the payload key based on the entered value.
-    """
+    """Build DeyeCloud login payload using either email or username."""
     login = login.strip()
 
     if "@" in login:
@@ -54,12 +48,7 @@ async def async_get_token(
     base_url,
     company_id=None,
 ):
-    """
-    Get DeyeCloud access token.
-
-    If company_id is provided, DeyeCloud returns a business/company token.
-    This is needed for installer/business accounts.
-    """
+    """Get DeyeCloud access token."""
     url = f"{base_url}/account/token?appId={app_id}"
 
     payload = {
@@ -79,6 +68,54 @@ async def async_get_token(
         raise DeyeCloudApiError(f"Token request failed: {data.get('msg') or data}")
 
     return data["accessToken"]
+
+
+async def async_post_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    token=None,
+    payload: dict[str, Any] | None = None,
+    timeout: int = 10,
+):
+    """POST JSON to DeyeCloud."""
+    headers = {"Content-Type": "application/json"}
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    async with session.post(url, json=payload or {}, headers=headers, timeout=timeout) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def async_get_battery_config(
+    session: aiohttp.ClientSession,
+    token,
+    base_url,
+    device_sn,
+):
+    """Read current DeyeCloud battery-related parameter values."""
+    url = f"{base_url}/config/battery"
+
+    payload = {
+        "deviceSn": device_sn,
+    }
+
+    data = await async_post_json(
+        session,
+        url,
+        token=token,
+        payload=payload,
+        timeout=10,
+    )
+
+    if not data.get("success", True):
+        raise DeyeCloudApiError(
+            f"Battery config request failed: {data.get('msg') or data}"
+        )
+
+    return data
 
 
 def _extract_order_id(data: dict[str, Any]):
@@ -132,19 +169,7 @@ def _extract_order_status(data: dict[str, Any]):
 
 
 def _classify_order_result(data: dict[str, Any]) -> str:
-    """
-    Classify a DeyeCloud command result.
-
-    Returns:
-      pending
-      success
-      failed
-
-    DeyeCloud's public samples show the order polling endpoint but do not
-    clearly document every possible terminal status code, so this is defensive.
-    Unknown success=True terminal-looking statuses are treated as success,
-    but logged so the mapping can be refined.
-    """
+    """Classify a DeyeCloud command result."""
     if not isinstance(data, dict):
         return "pending"
 
@@ -207,12 +232,9 @@ def _classify_order_result(data: dict[str, Any]) -> str:
     if "fail" in msg_text or "error" in msg_text or "timeout" in msg_text:
         return "failed"
 
-    # Some DeyeCloud responses use 1000000 for general success.
     if status is None and code_text == "1000000" and data.get("success") is True:
         return "success"
 
-    # If the API returns an unknown status while success=True, assume it is
-    # terminal success but log it for later refinement.
     if status is not None and data.get("success") is True:
         _LOGGER.warning(
             "Unknown DeyeCloud order status %s; treating as success. Full response: %s",
@@ -396,9 +418,8 @@ async def async_update_battery_parameter(
     """
     Set Deye battery parameter value.
 
-    Deye's official Python sample uses the misspelled key 'paramterType'.
-    This helper tries that first. If the API rejects it, it falls back to the
-    corrected spelling 'parameterType'.
+    Deye's official sample uses the misspelled key 'paramterType',
+    so try that first and fall back to 'parameterType'.
     """
     last_exc = None
 
