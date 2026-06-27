@@ -6,8 +6,12 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
-
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.BUTTON,
+    Platform.SWITCH,
+    Platform.NUMBER,
+]
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the DeyeCloud integration."""
