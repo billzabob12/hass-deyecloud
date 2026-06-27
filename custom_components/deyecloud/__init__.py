@@ -1,5 +1,21 @@
 """DeyeCloud integration."""
 
+from __future__ import annotations
+
+# Import platform modules at module load time.
+#
+# Home Assistant 2024.7+ can warn when platform modules are first imported
+# from inside async_forward_entry_setups(), because importlib/import_module
+# may do blocking disk I/O inside the event loop.
+#
+# Keeping these imports here pre-loads the platform modules when the integration
+# itself is loaded, so async_forward_entry_setups() can reuse already-imported
+# modules.
+from . import button as _button  # noqa: F401
+from . import number as _number  # noqa: F401
+from . import sensor as _sensor  # noqa: F401
+from . import switch as _switch  # noqa: F401
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
