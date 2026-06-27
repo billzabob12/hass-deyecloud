@@ -823,44 +823,44 @@ class DeyeCloudSensor(CoordinatorEntity, SensorEntity):
 
     _attr_has_entity_name = True
 
-        def __init__(
-            self,
-            coordinator: DeyeCloudCoordinator,
-            sensor_type: str,
-            name: str,
-            unique_id: str,
-            unit: str | None = None,
-            device_class: str | None = None,
-            state_class: str | None = None,
-            extra_attributes: dict | None = None,
-            station_id: str | None = None,
-            date_key: str | None = None,
-            metric_key: str | None = None,
-            device_sn: str | None = None,
-            device_key: str | None = None,
-            parameter_types: tuple[str, ...] | None = None,
-        ) -> None:
-            """Initialize the sensor."""
-            super().__init__(coordinator)
-    
-            self._sensor_type = sensor_type
-            self._attr_name = name
-            self._attr_unique_id = unique_id
-            self._attr_native_unit_of_measurement = _normalize_unit(unit)
-    
-            if device_class:
-                self._attr_device_class = device_class
-    
-            if state_class:
-                self._attr_state_class = state_class
-    
-            self._extra_attributes = extra_attributes or {}
-            self._station_id = str(station_id) if station_id is not None else None
-            self._date_key = date_key
-            self._metric_key = metric_key
-            self._device_sn = str(device_sn) if device_sn is not None else None
-            self._device_key = device_key
-            self._parameter_types = parameter_types
+    def __init__(
+        self,
+        coordinator: DeyeCloudCoordinator,
+        sensor_type: str,
+        name: str,
+        unique_id: str,
+        unit: str | None = None,
+        device_class: str | None = None,
+        state_class: str | None = None,
+        extra_attributes: dict | None = None,
+        station_id: str | None = None,
+        date_key: str | None = None,
+        metric_key: str | None = None,
+        device_sn: str | None = None,
+        device_key: str | None = None,
+        parameter_types: tuple[str, ...] | None = None,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+
+        self._sensor_type = sensor_type
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = _normalize_unit(unit)
+
+        if device_class:
+            self._attr_device_class = device_class
+
+        if state_class:
+            self._attr_state_class = state_class
+
+        self._extra_attributes = extra_attributes or {}
+        self._station_id = str(station_id) if station_id is not None else None
+        self._date_key = date_key
+        self._metric_key = metric_key
+        self._device_sn = str(device_sn) if device_sn is not None else None
+        self._device_key = device_key
+        self._parameter_types = parameter_types
 
     @property
     def native_value(self):
