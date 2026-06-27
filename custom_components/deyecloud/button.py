@@ -1,21 +1,24 @@
+"""DeyeCloud button entities."""
+
 import logging
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .api import async_control_solar_sell, async_get_token
 from .const import (
-    DOMAIN,
-    CONF_USERNAME,
-    CONF_PASSWORD,
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_BASE_URL,
     CONF_COMPANY_ID,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    DOMAIN,
 )
-from .api import async_get_token, async_control_solar_sell
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,10 +33,8 @@ async def _async_fetch_station_list(session, token, base_url):
         data = await resp.json()
 
     if not data.get("success", True):
-        raise Exception(f"Station list request failed: {data.get('msg')}")
+        raise HomeAssistantError(f"Station list request failed: {data.get('msg')}")
 
-    # DeyeCloud can return stationList: null for accounts without accessible
-    # personal stations, especially installer/business accounts without companyId.
     return data.get("stationList") or []
 
 
@@ -56,18 +57,25 @@ async def _async_fetch_inverter_devices(session, token, base_url, station_ids):
             "stationIds": station_ids,
         }
 
-        async with session.post(device_url, headers=headers, json=payload, timeout=10) as resp:
+        async with session.post(
+            device_url,
+            headers=headers,
+            json=payload,
+            timeout=10,
+        ) as resp:
             resp.raise_for_status()
             device_response = await resp.json()
 
         if not device_response.get("success", True):
-            raise Exception(f"Device list request failed: {device_response.get('msg')}")
+            raise HomeAssistantError(
+                f"Device list request failed: {device_response.get('msg')}"
+            )
 
-        # Avoid NoneType iteration if API returns deviceListItems: null.
         page_items = device_response.get("deviceListItems") or []
         devices.extend(page_items)
 
         total = device_response.get("total") or device_response.get("totalCount")
+
         if total is not None and len(devices) >= int(total):
             break
 
@@ -114,9 +122,9 @@ async def async_setup_entry(
 
         stations_data = await _async_fetch_station_list(session, token, base_url)
         station_ids = [
-            st.get("id") or st.get("stationId")
-            for st in stations_data
-            if st.get("id") or st.get("stationId")
+            station.get("id") or station.get("stationId")
+            for station in stations_data
+            if station.get("id") or station.get("stationId")
         ]
 
         if not station_ids:
@@ -135,33 +143,37 @@ async def async_setup_entry(
         for device in inverter_devices:
             sn = device["deviceSn"]
 
-            entities.append(DeyeSolarSellButton(
-                hass,
-                username,
-                password,
-                app_id,
-                app_secret,
-                base_url,
-                company_id,
-                sn,
-                "Enable",
-                True,
-                "mdi:solar-power",
-            ))
+            entities.append(
+                DeyeSolarSellButton(
+                    hass,
+                    username,
+                    password,
+                    app_id,
+                    app_secret,
+                    base_url,
+                    company_id,
+                    sn,
+                    "Enable",
+                    True,
+                    "mdi:solar-power",
+                )
+            )
 
-            entities.append(DeyeSolarSellButton(
-                hass,
-                username,
-                password,
-                app_id,
-                app_secret,
-                base_url,
-                company_id,
-                sn,
-                "Disable",
-                False,
-                "mdi:solar-power-variant-outline",
-            ))
+            entities.append(
+                DeyeSolarSellButton(
+                    hass,
+                    username,
+                    password,
+                    app_id,
+                    app_secret,
+                    base_url,
+                    company_id,
+                    sn,
+                    "Disable",
+                    False,
+                    "mdi:solar-power-variant-outline",
+                )
+            )
 
             _LOGGER.info("Created Solar Sell buttons for device: %s", sn)
 
@@ -198,7 +210,7 @@ class DeyeSolarSellButton(ButtonEntity):
         self._device_sn = device_sn
         self._is_enable = is_enable
 
-        self._attr_name = f"Deye Solar Sell {action_name}"
+        self._attr_name = f"Deye Solar Sell {action_name} {device_sn}"
         self._attr_unique_id = f"{device_sn}_solar_sell_{action_name.lower()}_btn"
         self._attr_icon = icon
 
@@ -227,19 +239,24 @@ class DeyeSolarSellButton(ButtonEntity):
                 self._company_id,
             )
 
-            await async_control_solar_sell(
+            response = await async_control_solar_sell(
                 session,
                 token,
                 self._base_url,
                 self._device_sn,
                 self._is_enable,
+                wait_for_result=True,
             )
 
             _LOGGER.info(
-                "Solar Sell %s command sent for device %s",
+                "Solar Sell %s confirmed for device %s: %s",
                 "enable" if self._is_enable else "disable",
                 self._device_sn,
+                response,
             )
 
         except Exception as exc:
-            _LOGGER.error("Failed to press button %s: %s", self.name, exc)
+            raise HomeAssistantError(
+                f"Failed to {'enable' if self._is_enable else 'disable'} "
+                f"Deye Solar Sell for {self._device_sn}: {exc}"
+            ) from exc
