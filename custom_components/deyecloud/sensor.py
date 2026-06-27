@@ -888,7 +888,10 @@ class DeyeCloudSensor(CoordinatorEntity, SensorEntity):
                     target = dt_util.now() - relativedelta(months=1)
 
                 for record in station_data.get("history", []):
-                    if record.get("year") == target.year and record.get("month") == target.month:
+                    if (
+                        record.get("year") == target.year
+                        and record.get("month") == target.month
+                    ):
                         return _as_float_or_original(record.get(self._metric_key))
 
             elif self._sensor_type == "daily":
