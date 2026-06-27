@@ -730,7 +730,8 @@ class DeyeCloudSensor(CoordinatorEntity, SensorEntity):
         state_class: str | None = None,
         extra_attributes: dict | None = None,
         station_id: str | None = None,
-        date_key: str | None = None,
+        device_key: str | None = None,
+        parameter_types: tuple[str, ...] | None = None,
         metric_key: str | None = None,
         device_sn: str | None = None,
         device_key: str | None = None,
@@ -751,6 +752,7 @@ class DeyeCloudSensor(CoordinatorEntity, SensorEntity):
         self._metric_key = metric_key
         self._device_sn = str(device_sn) if device_sn is not None else None
         self._device_key = device_key
+        self._parameter_types = parameter_types
 
     @property
     def native_value(self):
@@ -789,6 +791,13 @@ class DeyeCloudSensor(CoordinatorEntity, SensorEntity):
                 for data_item in device_data.get("dataList") or []:
                     if data_item.get("key") == self._device_key:
                         return _as_float_or_original(data_item.get("value"))
+
+            elif self._sensor_type == "battery_parameter":
+                battery_config = station_data.get("battery_config", {}).get(self._device_sn, {})
+                return extract_battery_parameter(
+                    battery_config,
+                    self._parameter_types or (),
+                )
 
         except (KeyError, ValueError, TypeError) as exc:
             _LOGGER.error("Error extracting value for %s: %s", self.unique_id, exc)
@@ -1032,6 +1041,24 @@ async def async_setup_entry(
                         "device_type": device_data.get("deviceType"),
                         "device_state": device_data.get("deviceState"),
                         "collection_time": device_data.get("collectionTime"),
+                    },
+                ))
+            # Battery parameter readback sensors.
+            for description in BATTERY_PARAMETER_DESCRIPTIONS:
+                entities.append(DeyeCloudSensor(
+                    coordinator=coordinator,
+                    sensor_type="battery_parameter",
+                    name=f"{description.name} {device_sn}",
+                    unique_id=f"device_{device_sn}_{description.key}_sensor",
+                    unit=description.unit,
+                    device_class="current",
+                    state_class="measurement",
+                    station_id=station_id,
+                    device_sn=device_sn,
+                    parameter_types=description.parameter_types,
+                    extra_attributes={
+                        "source": "config/battery",
+                        "parameter_types": list(description.parameter_types),
                     },
                 ))
 
