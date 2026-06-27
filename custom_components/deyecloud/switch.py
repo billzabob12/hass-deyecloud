@@ -1,3 +1,5 @@
+"""DeyeCloud switch entities."""
+
 import logging
 
 from homeassistant.components.switch import SwitchEntity
@@ -7,16 +9,16 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .api import async_get_token, async_control_grid_charge
-from .button import _async_fetch_station_list, _async_fetch_inverter_devices
+from .api import async_control_grid_charge, async_get_token
+from .button import _async_fetch_inverter_devices, _async_fetch_station_list
 from .const import (
-    DOMAIN,
-    CONF_USERNAME,
-    CONF_PASSWORD,
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_BASE_URL,
     CONF_COMPANY_ID,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,10 +55,16 @@ async def async_setup_entry(
 
         stations_data = await _async_fetch_station_list(session, token, base_url)
         station_ids = [
-            st.get("id") or st.get("stationId")
-            for st in stations_data
-            if st.get("id") or st.get("stationId")
+            station.get("id") or station.get("stationId")
+            for station in stations_data
+            if station.get("id") or station.get("stationId")
         ]
+
+        if not station_ids:
+            _LOGGER.warning(
+                "No DeyeCloud stations found for switch setup. "
+                "If this is an installer/business account, configure company_id."
+            )
 
         inverter_devices = await _async_fetch_inverter_devices(
             session,
@@ -67,6 +75,7 @@ async def async_setup_entry(
 
         for device in inverter_devices:
             sn = device["deviceSn"]
+
             entities.append(
                 DeyeGridChargeSwitch(
                     hass,
@@ -79,6 +88,8 @@ async def async_setup_entry(
                     sn,
                 )
             )
+
+            _LOGGER.info("Created Grid Charge switch for device: %s", sn)
 
     except Exception as exc:
         _LOGGER.error("Error setting up Deye grid charge switches: %s", exc)
@@ -113,10 +124,13 @@ class DeyeGridChargeSwitch(SwitchEntity):
         self._attr_unique_id = f"{device_sn}_grid_charge"
         self._attr_icon = "mdi:battery-charging"
         self._attr_assumed_state = True
+
+        # Unknown until this integration sends a command.
         self._attr_is_on = None
 
     @property
     def device_info(self):
+        """Return device information."""
         return {
             "identifiers": {(DOMAIN, self._device_sn)},
             "name": f"Deye Inverter {self._device_sn}",
@@ -126,9 +140,11 @@ class DeyeGridChargeSwitch(SwitchEntity):
 
     @property
     def is_on(self):
+        """Return grid charge state."""
         return self._attr_is_on
 
     async def _async_send(self, enable: bool) -> None:
+        """Send grid charge command and wait for DeyeCloud confirmation."""
         session = async_get_clientsession(self.hass)
 
         try:
@@ -148,10 +164,11 @@ class DeyeGridChargeSwitch(SwitchEntity):
                 self._base_url,
                 self._device_sn,
                 enable,
+                wait_for_result=True,
             )
 
             _LOGGER.info(
-                "Grid charge %s command sent for device %s: %s",
+                "Grid charge %s confirmed for device %s: %s",
                 "enable" if enable else "disable",
                 self._device_sn,
                 response,
@@ -162,11 +179,14 @@ class DeyeGridChargeSwitch(SwitchEntity):
 
         except Exception as exc:
             raise HomeAssistantError(
-                f"Failed to {'enable' if enable else 'disable'} Deye grid charge: {exc}"
+                f"Failed to {'enable' if enable else 'disable'} "
+                f"Deye grid charge for {self._device_sn}: {exc}"
             ) from exc
 
     async def async_turn_on(self, **kwargs) -> None:
+        """Turn on grid charge."""
         await self._async_send(True)
 
     async def async_turn_off(self, **kwargs) -> None:
+        """Turn off grid charge."""
         await self._async_send(False)
