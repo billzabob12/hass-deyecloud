@@ -1,4 +1,7 @@
+"""DeyeCloud number entities."""
+
 import logging
+from dataclasses import dataclass
 
 from homeassistant.components.number import NumberEntity
 from homeassistant.config_entries import ConfigEntry
@@ -8,21 +11,66 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import async_get_token, async_update_battery_parameter
-from .button import _async_fetch_station_list, _async_fetch_inverter_devices
+from .button import _async_fetch_inverter_devices, _async_fetch_station_list
 from .const import (
-    DOMAIN,
-    CONF_USERNAME,
-    CONF_PASSWORD,
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_BASE_URL,
     CONF_COMPANY_ID,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 MAX_CHARGE_CURRENT = "MAX_CHARGE_CURRENT"
 MAX_DISCHARGE_CURRENT = "MAX_DISCHARGE_CURRENT"
+GRID_CHARGE_AMPERE = "GRID_CHARGE_AMPERE"
+
+
+@dataclass(frozen=True)
+class DeyeBatteryNumberDescription:
+    """Description for a Deye battery number entity."""
+
+    key: str
+    name: str
+    parameter_types: tuple[str, ...]
+    icon: str
+    min_value: float = 0
+    max_value: float = 250
+    step: float = 1
+
+
+NUMBER_DESCRIPTIONS: tuple[DeyeBatteryNumberDescription, ...] = (
+    DeyeBatteryNumberDescription(
+        key="max_battery_charge_current",
+        name="Max Battery Charge Current",
+        parameter_types=(MAX_CHARGE_CURRENT,),
+        icon="mdi:battery-arrow-up",
+        min_value=0,
+        max_value=250,
+        step=1,
+    ),
+    DeyeBatteryNumberDescription(
+        key="max_battery_discharge_current",
+        name="Max Battery Discharge Current",
+        parameter_types=(MAX_DISCHARGE_CURRENT,),
+        icon="mdi:battery-arrow-down",
+        min_value=0,
+        max_value=250,
+        step=1,
+    ),
+    DeyeBatteryNumberDescription(
+        key="grid_charge_current",
+        name="Grid Charge Current",
+        parameter_types=(GRID_CHARGE_AMPERE,),
+        icon="mdi:transmission-tower-import",
+        min_value=0,
+        max_value=250,
+        step=1,
+    ),
+)
 
 
 async def async_setup_entry(
@@ -30,7 +78,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up DeyeCloud battery current number entities."""
+    """Set up DeyeCloud battery/grid current number entities."""
     config = entry.data
 
     username = config.get(CONF_USERNAME)
@@ -56,10 +104,16 @@ async def async_setup_entry(
 
         stations_data = await _async_fetch_station_list(session, token, base_url)
         station_ids = [
-            st.get("id") or st.get("stationId")
-            for st in stations_data
-            if st.get("id") or st.get("stationId")
+            station.get("id") or station.get("stationId")
+            for station in stations_data
+            if station.get("id") or station.get("stationId")
         ]
+
+        if not station_ids:
+            _LOGGER.warning(
+                "No DeyeCloud stations found for number setup. "
+                "If this is an installer/business account, configure company_id."
+            )
 
         inverter_devices = await _async_fetch_inverter_devices(
             session,
@@ -71,46 +125,31 @@ async def async_setup_entry(
         for device in inverter_devices:
             sn = device["deviceSn"]
 
-            entities.append(
-                DeyeBatteryCurrentNumber(
-                    hass,
-                    username,
-                    password,
-                    app_id,
-                    app_secret,
-                    base_url,
-                    company_id,
-                    sn,
-                    "Max Battery Charge Current",
-                    MAX_CHARGE_CURRENT,
-                    "mdi:battery-arrow-up",
+            for description in NUMBER_DESCRIPTIONS:
+                entities.append(
+                    DeyeBatteryCurrentNumber(
+                        hass,
+                        username,
+                        password,
+                        app_id,
+                        app_secret,
+                        base_url,
+                        company_id,
+                        sn,
+                        description,
+                    )
                 )
-            )
 
-            entities.append(
-                DeyeBatteryCurrentNumber(
-                    hass,
-                    username,
-                    password,
-                    app_id,
-                    app_secret,
-                    base_url,
-                    company_id,
-                    sn,
-                    "Max Battery Discharge Current",
-                    MAX_DISCHARGE_CURRENT,
-                    "mdi:battery-arrow-down",
-                )
-            )
+            _LOGGER.info("Created battery/grid current number entities for device: %s", sn)
 
     except Exception as exc:
-        _LOGGER.error("Error setting up Deye battery current numbers: %s", exc)
+        _LOGGER.error("Error setting up Deye battery/grid current numbers: %s", exc)
 
     async_add_entities(entities)
 
 
 class DeyeBatteryCurrentNumber(NumberEntity):
-    """DeyeCloud battery current limit number."""
+    """DeyeCloud battery/grid current limit number."""
 
     def __init__(
         self,
@@ -122,9 +161,7 @@ class DeyeBatteryCurrentNumber(NumberEntity):
         base_url,
         company_id,
         device_sn,
-        name,
-        parameter_type,
-        icon,
+        description: DeyeBatteryNumberDescription,
     ):
         self.hass = hass
         self._username = username
@@ -134,23 +171,25 @@ class DeyeBatteryCurrentNumber(NumberEntity):
         self._base_url = base_url
         self._company_id = company_id
         self._device_sn = device_sn
-        self._parameter_type = parameter_type
+        self._description = description
 
-        self._attr_name = f"Deye {name} {device_sn}"
-        self._attr_unique_id = f"{device_sn}_{parameter_type.lower()}"
-        self._attr_icon = icon
+        self._attr_name = f"Deye {description.name} {device_sn}"
+        self._attr_unique_id = f"{device_sn}_{description.key}"
+        self._attr_icon = description.icon
 
         self._attr_native_unit_of_measurement = "A"
-        self._attr_native_min_value = 0
-        self._attr_native_max_value = 250
-        self._attr_native_step = 1
+        self._attr_native_min_value = description.min_value
+        self._attr_native_max_value = description.max_value
+        self._attr_native_step = description.step
         self._attr_mode = "box"
 
-        # Unknown until HA sets it, unless you later add /config/battery readback.
+        # Unknown until this integration sends a command.
+        # Later this could be initialised from DeyeCloud /config/battery.
         self._attr_native_value = None
 
     @property
     def device_info(self):
+        """Return device information."""
         return {
             "identifiers": {(DOMAIN, self._device_sn)},
             "name": f"Deye Inverter {self._device_sn}",
@@ -159,8 +198,9 @@ class DeyeBatteryCurrentNumber(NumberEntity):
         }
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set Deye battery current limit."""
+        """Set Deye battery/grid current value and wait for confirmation."""
         session = async_get_clientsession(self.hass)
+        last_exc = None
 
         try:
             token = await async_get_token(
@@ -173,27 +213,45 @@ class DeyeBatteryCurrentNumber(NumberEntity):
                 self._company_id,
             )
 
-            response = await async_update_battery_parameter(
-                session,
-                token,
-                self._base_url,
-                self._device_sn,
-                self._parameter_type,
-                value,
-            )
+            for parameter_type in self._description.parameter_types:
+                try:
+                    response = await async_update_battery_parameter(
+                        session,
+                        token,
+                        self._base_url,
+                        self._device_sn,
+                        parameter_type,
+                        value,
+                        wait_for_result=True,
+                    )
 
-            _LOGGER.info(
-                "Set %s to %sA for device %s: %s",
-                self._parameter_type,
-                value,
-                self._device_sn,
-                response,
-            )
+                    _LOGGER.info(
+                        "Confirmed %s set to %sA for device %s using %s: %s",
+                        self._description.name,
+                        value,
+                        self._device_sn,
+                        parameter_type,
+                        response,
+                    )
 
-            self._attr_native_value = value
-            self.async_write_ha_state()
+                    self._attr_native_value = value
+                    self.async_write_ha_state()
+                    return
+
+                except Exception as exc:
+                    last_exc = exc
+                    _LOGGER.warning(
+                        "Failed to set %s for device %s using parameter type %s: %s",
+                        self._description.name,
+                        self._device_sn,
+                        parameter_type,
+                        exc,
+                    )
+
+            raise last_exc
 
         except Exception as exc:
             raise HomeAssistantError(
-                f"Failed to set {self._parameter_type} to {value}A: {exc}"
+                f"Failed to set {self._description.name} to {value}A "
+                f"for {self._device_sn}: {exc}"
             ) from exc
